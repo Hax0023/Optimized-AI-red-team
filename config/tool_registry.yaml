@@ -1,0 +1,172 @@
+# Security tool registry
+# phase: which phase runs this tool
+# tier: mandatory | conditional | optional
+# condition: when conditional tools apply
+# compress: whether to run output through Haiku compressor before passing to agent
+
+tools:
+  # Phase 0 — Discovery
+  nmap:
+    phase: 0
+    tier: mandatory
+    compress: true
+    description: Port scanning and service fingerprinting
+    docker_cmd: nmap -sV -sC --open -oN {output} {target}
+
+  nuclei:
+    phase: 0
+    tier: mandatory
+    compress: true
+    description: Template-based vulnerability scanning
+    docker_cmd: nuclei -u {target} -o {output} -severity low,medium,high,critical
+
+  ffuf:
+    phase: 0
+    tier: mandatory
+    compress: true
+    description: Web fuzzing for directory/file discovery
+    docker_cmd: ffuf -u {target}/FUZZ -w /wordlists/common.txt -fc 404 -o {output}
+
+  feroxbuster:
+    phase: 0
+    tier: mandatory
+    compress: true
+    description: Recursive content discovery
+    docker_cmd: feroxbuster -u {target} -o {output} --insecure -C 404
+
+  katana:
+    phase: 0
+    tier: mandatory
+    compress: true
+    description: Crawler for endpoint discovery
+    docker_cmd: katana -u {target} -o {output} -depth 3
+
+  whatweb:
+    phase: 0
+    tier: mandatory
+    compress: false
+    description: Technology fingerprinting
+    docker_cmd: whatweb {target} -v
+
+  gau:
+    phase: 0
+    tier: conditional
+    condition: target has indexed content
+    compress: true
+    description: Fetch known URLs from AlienVault, Wayback, Common Crawl
+    docker_cmd: gau {domain} | tee {output}
+
+  nikto:
+    phase: 0
+    tier: optional
+    compress: true
+    description: Web server scanner
+    docker_cmd: nikto -host {target} -o {output}
+
+  wapiti:
+    phase: 0
+    tier: optional
+    compress: true
+    description: Web app vulnerability scanner
+    docker_cmd: wapiti -u {target} -o {output}
+
+  wafw00f:
+    phase: 0
+    tier: mandatory
+    compress: false
+    description: WAF fingerprinting
+    docker_cmd: wafw00f {target}
+
+  # Phase 3 — Authentication
+  hydra:
+    phase: 3
+    tier: conditional
+    condition: login form discovered and no lockout
+    compress: false
+    description: Brute force authentication
+    docker_cmd: hydra -L /wordlists/users.txt -P /wordlists/passwords.txt {target} http-post-form "{form}"
+
+  jwt_tool:
+    phase: 3
+    tier: conditional
+    condition: JWT tokens present
+    compress: false
+    description: JWT attack toolkit
+    docker_cmd: python3 /tools/jwt_tool/jwt_tool.py {token} -M pb
+
+  # Phase 4 — Input Validation
+  sqlmap:
+    phase: 4
+    tier: mandatory
+    compress: true
+    description: SQL injection detection and exploitation
+    docker_cmd: sqlmap -u "{url}" --batch --level=3 --risk=2 --dbs -o
+
+  dalfox:
+    phase: 4
+    tier: mandatory
+    compress: true
+    description: XSS detection and exploitation
+    docker_cmd: dalfox url "{url}" --follow-redirects -o {output}
+
+  commix:
+    phase: 4
+    tier: conditional
+    condition: command injection suspected
+    compress: true
+    description: Command injection exploitation
+    docker_cmd: commix --url="{url}" --batch
+
+  sstimap:
+    phase: 4
+    tier: conditional
+    condition: template injection suspected
+    compress: true
+    description: SSTI detection and exploitation
+    docker_cmd: python3 /tools/SSTImap/sstimap.py -u "{url}"
+
+  crlfuzz:
+    phase: 4
+    tier: optional
+    compress: true
+    description: CRLF injection fuzzer
+    docker_cmd: crlfuzz -u "{url}"
+
+  smuggler:
+    phase: 4
+    tier: optional
+    compress: false
+    description: HTTP request smuggling detection
+    docker_cmd: python3 /tools/smuggler/smuggler.py -u {target}
+
+  nosqli:
+    phase: 4
+    tier: conditional
+    condition: NoSQL database detected
+    compress: false
+    description: NoSQL injection testing
+    docker_cmd: nosqli -u "{url}" -p {param}
+
+  # Phase 5 — Crypto / Misc
+  testssl:
+    phase: 5
+    tier: mandatory
+    compress: true
+    description: TLS/SSL configuration testing
+    docker_cmd: testssl.sh --jsonfile {output} {target}
+
+  graphql-cop:
+    phase: 5
+    tier: conditional
+    condition: GraphQL endpoint discovered
+    compress: false
+    description: GraphQL security testing
+    docker_cmd: python3 /tools/graphql-cop/graphql-cop.py -t {target}
+
+  websocat:
+    phase: 5
+    tier: conditional
+    condition: WebSocket endpoints discovered
+    compress: false
+    description: WebSocket testing
+    docker_cmd: websocat {ws_url}

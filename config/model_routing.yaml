@@ -1,0 +1,25 @@
+# Model routing configuration
+# Override any task_type → model mapping from the defaults in model_router.py
+# Valid models: claude-haiku-4-5, claude-sonnet-4-6, claude-opus-4-7
+
+task_overrides: {}
+  # Example overrides:
+  # reconnaissance: claude-opus-4-7       # use Opus for recon (more thorough)
+  # context_compression: claude-haiku-4-5 # already default, shown for clarity
+
+# Budget thresholds (USD)
+budget:
+  default_usd: 15.00
+  warn_at_pct: 70      # warn when 70% spent
+  downgrade_at_pct: 90  # force Sonnet ceiling at 90%
+  emergency_at_pct: 97  # force Haiku at 97%
+
+# Per-phase budget allocation hints (sum should be ~1.0)
+phase_budget_weights:
+  0: 0.10   # Discovery
+  1: 0.05   # Info gathering
+  2: 0.08   # Config testing
+  3: 0.15   # Auth/Authz/Session
+  4: 0.40   # Input validation (highest cost, most value)
+  5: 0.12   # Error/Crypto/BizLogic
+  6: 0.10   # Reporting + Final Judge

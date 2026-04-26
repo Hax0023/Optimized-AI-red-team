@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "autopentest-ai": {
+      "command": "python",
+      "args": ["-m", "server.server"],
+      "env": {
+        "ANTHROPIC_API_KEY": "${ANTHROPIC_API_KEY}",
+        "ENGAGEMENT_DIR": "./engagements"
+      }
+    }
+  }
+}
