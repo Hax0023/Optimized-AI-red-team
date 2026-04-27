@@ -29,5 +29,10 @@ services:
     environment:
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
       - ENGAGEMENT_DIR=/app/engagements
+      # When Burp runs on the host, use host.docker.internal to reach it from this container.
+      # The tools container uses network_mode:host so 127.0.0.1 works there directly.
+      - BURP_HOST=host.docker.internal
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     ports:
       - "8000:8000"

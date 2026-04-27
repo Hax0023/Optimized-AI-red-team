@@ -327,6 +327,81 @@ Every in-scope domain is an independent attack surface.
 
 ---
 
+## Burp Suite Integration (`-burp` flag)
+
+When the user includes `-burp` or `--burp` in their pentest request, activate Burp mode:
+
+### Step 1 — Enable Burp at Engagement Start
+```
+enable_burp(eid, proxy_host="127.0.0.1", proxy_port=8080, api_port=1337, api_key="")
+```
+- If `proxy_alive: false` → warn user: "Start Burp with proxy listener on port 8080"
+- If `api_alive: false` → warn: "Active scanning unavailable — enable REST API in Burp Pro settings"
+- Proceed regardless — proxy capture still works without the REST API
+
+### Step 2 — Route ALL HTTP Tool Traffic Through Burp
+
+Before running any HTTP tool (nuclei, ffuf, sqlmap, dalfox, feroxbuster, katana, etc.):
+```
+proxy = get_burp_proxy_args(eid, tool_name)
+# proxy["cli_args"] → append to tool command
+# proxy["docker_env_flags"] → inject into docker exec for env-based tools
+```
+
+**Standard tools** (nuclei, ffuf, sqlmap, dalfox, feroxbuster, katana):
+```bash
+docker exec autopentest-tools {tool} {args} {proxy["cli_args"]}
+# Example: docker exec autopentest-tools nuclei -u https://target.com --proxy http://127.0.0.1:8080
+```
+
+**Env-proxy tools** (whatweb, nikto, gau, hakrawler, wafw00f):
+```bash
+docker exec {proxy["docker_env_flags"]} autopentest-tools {tool} {args}
+# Example: docker exec -e HTTP_PROXY=http://127.0.0.1:8080 -e HTTPS_PROXY=http://127.0.0.1:8080 autopentest-tools nikto -host target.com
+```
+
+Use `proxy["example_cmd"]` from the MCP response for the exact ready-to-run command.
+
+### Step 3 — Trigger Active Scan After Phase 0
+
+After Scout completes and you have the endpoint map:
+```
+start_burp_scan(eid, target_urls="url1,url2,url3,...", scan_config="")
+# Returns: {"success": true, "task_id": "123"}
+```
+Run this in parallel with Phase 1 — don't wait for it before continuing.
+
+### Step 4 — Poll Until Complete
+
+Check scan status while other phases run:
+```
+poll_burp_scan(eid, task_id)
+# Returns: {"status": "running"|"succeeded"|"failed", "progress": 45, "issue_count": 3}
+```
+Poll every 60 seconds. Status `succeeded` means scan is done.
+
+### Step 5 — Import Burp Findings
+
+When `poll_burp_scan` returns `status == "succeeded"`:
+```
+import_burp_findings(eid, task_id)
+# Returns: {"imported": 7, "skipped_duplicates": 2, "total_from_burp": 9}
+```
+Imported findings appear in the finding log with `source: burp_active_scan`.
+They go through the same dedup check as manually logged findings.
+
+### Burp Mode Summary Table
+
+| Step | When | MCP Call |
+|------|------|----------|
+| Enable | After create_engagement | `enable_burp(eid)` |
+| Proxy each tool | Before every docker exec | `get_burp_proxy_args(eid, tool)` |
+| Start active scan | After Phase 0 Scout | `start_burp_scan(eid, urls)` |
+| Monitor scan | Every 60s while other phases run | `poll_burp_scan(eid, task_id)` |
+| Import findings | When scan `succeeded` | `import_burp_findings(eid, task_id)` |
+
+---
+
 ## Error Recovery
 
 **Tool fails / times out:**

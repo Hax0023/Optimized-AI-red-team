@@ -14,6 +14,7 @@ from fastmcp import FastMCP
 
 from .supervisor import Supervisor
 from .phase_gates import check_phase_gate
+from .burp_bridge import BurpBridge, from_engagement_config as _burp_from_config
 
 mcp = FastMCP("autopentest-ai")
 
@@ -905,6 +906,230 @@ def list_wstg_tests(category: str = "") -> str:
     return json.dumps({
         "count": len(tests),
         "tests": {k: v["name"] for k, v in tests.items()},
+    })
+
+
+# ════════════════════════════════════════════════════════════════════════════════
+# BURP SUITE INTEGRATION
+# ════════════════════════════════════════════════════════════════════════════════
+
+@mcp.tool()
+def enable_burp(
+    eid: str,
+    proxy_host: str = "",
+    proxy_port: int = 8080,
+    api_port: int = 1337,
+    api_key: str = "",
+) -> str:
+    """
+    Enable Burp Suite integration for this engagement.
+    proxy_host: host running Burp. Defaults to BURP_HOST env var or 127.0.0.1.
+    proxy_port: Burp proxy listener port (default 8080).
+    api_port: Burp REST API port (default 1337 — requires Burp Suite Pro).
+    api_key: Burp REST API key (Project Options → Misc → REST API → enable + copy key).
+    Verifies connectivity before saving. Active scanning requires Burp Pro.
+    """
+    import os
+    host = proxy_host or os.getenv("BURP_HOST", "127.0.0.1")
+    bridge = BurpBridge(host, proxy_port, api_port, api_key)
+    proxy_alive = bridge.is_proxy_alive()
+    api_alive = bridge.is_api_alive()
+
+    path = _eng_path(eid)
+    config = _read_json(path / "config.json")
+    config["burp"] = {
+        "enabled": True,
+        "proxy_host": host,
+        "proxy_port": proxy_port,
+        "api_port": api_port,
+        "api_key": api_key,
+        "proxy_url": bridge.proxy_url,
+        "connected_at": datetime.utcnow().isoformat(),
+    }
+    _write_json(path / "config.json", config)
+    _log(eid, f"[BURP] enabled proxy={bridge.proxy_url} proxy_alive={proxy_alive} api_alive={api_alive}")
+
+    result: dict = {
+        "enabled": True,
+        "proxy_url": bridge.proxy_url,
+        "proxy_alive": proxy_alive,
+        "api_alive": api_alive,
+    }
+    if not proxy_alive:
+        result["warning"] = (
+            f"Cannot reach Burp proxy at {bridge.proxy_url} — "
+            f"ensure Burp is running with a proxy listener on port {proxy_port}."
+        )
+    if not api_alive:
+        result["api_warning"] = (
+            f"Burp REST API not reachable at port {api_port}. "
+            "Active scanning requires Burp Suite Professional. "
+            "Enable at: Project Options → Misc → REST API → Enable service."
+        )
+    return json.dumps(result)
+
+
+@mcp.tool()
+def get_burp_proxy_args(eid: str, tool_name: str) -> str:
+    """
+    Get proxy flags to inject into a tool command when Burp is enabled.
+    Returns cli_args (append to tool command) and env_vars / docker_env_flags
+    (add to `docker exec -e` invocations) for env-based proxy tools.
+    Returns empty lists if Burp is not enabled for this engagement.
+    Usage: docker exec {docker_env_flags} autopentest-tools {tool} {tool_args} {cli_args}
+    """
+    path = _eng_path(eid)
+    config = _read_json(path / "config.json")
+    bridge = _burp_from_config(config)
+    if not bridge:
+        return json.dumps({"burp_enabled": False, "cli_args": [], "env_vars": {}, "docker_env_flags": ""})
+
+    cli_args = bridge.get_proxy_args(tool_name)
+    env_vars = bridge.get_proxy_env() if bridge.needs_env_proxy(tool_name) else {}
+    docker_env_flags = " ".join(f"-e {k}={v}" for k, v in env_vars.items())
+
+    return json.dumps({
+        "burp_enabled": True,
+        "proxy_url": bridge.proxy_url,
+        "tool": tool_name,
+        "cli_args": cli_args,
+        "env_vars": env_vars,
+        "docker_env_flags": docker_env_flags,
+        "example_cmd": (
+            f"docker exec {docker_env_flags} autopentest-tools "
+            f"{tool_name} [target] {' '.join(cli_args)}"
+        ).strip(),
+    })
+
+
+@mcp.tool()
+def start_burp_scan(
+    eid: str,
+    target_urls: str,
+    scan_config: str = "",
+) -> str:
+    """
+    Trigger a Burp Suite active scan on a set of URLs.
+    target_urls: comma-separated list of URLs discovered during recon phases.
+    scan_config: optional named Burp scan configuration (e.g. 'Audit checks - all insertion points').
+    Requires Burp Suite Professional with REST API enabled.
+    Returns task_id — pass to poll_burp_scan() and import_burp_findings().
+    """
+    path = _eng_path(eid)
+    config = _read_json(path / "config.json")
+    bridge = _burp_from_config(config)
+    if not bridge:
+        return json.dumps({"error": "Burp not enabled. Call enable_burp() first."})
+
+    urls = [u.strip() for u in target_urls.split(",") if u.strip()]
+    scope_includes = config.get("scope_domains", [])
+    result = bridge.start_active_scan(urls, scope_includes, scan_config or None)
+
+    if result.get("success"):
+        config.setdefault("burp_scans", []).append({
+            "task_id": result["task_id"],
+            "urls": urls,
+            "started_at": datetime.utcnow().isoformat(),
+            "status": "running",
+        })
+        _write_json(path / "config.json", config)
+        _log(eid, f"[BURP] scan started task_id={result['task_id']} urls={len(urls)}")
+
+    return json.dumps(result)
+
+
+@mcp.tool()
+def poll_burp_scan(eid: str, task_id: str) -> str:
+    """
+    Check the status of a running Burp active scan.
+    Returns: status (running | succeeded | failed), progress %, requests_made, issue_count.
+    Poll every 30-60 seconds until status == 'succeeded', then call import_burp_findings().
+    """
+    path = _eng_path(eid)
+    config = _read_json(path / "config.json")
+    bridge = _burp_from_config(config)
+    if not bridge:
+        return json.dumps({"error": "Burp not enabled for this engagement."})
+
+    status = bridge.get_scan_status(task_id)
+
+    for scan in config.get("burp_scans", []):
+        if scan["task_id"] == task_id:
+            scan["status"] = status.get("status", "unknown")
+            scan["last_polled"] = datetime.utcnow().isoformat()
+            break
+    _write_json(path / "config.json", config)
+    _log(eid, f"[BURP] poll task={task_id} status={status.get('status')} progress={status.get('progress')}%")
+    return json.dumps(status)
+
+
+@mcp.tool()
+def import_burp_findings(eid: str, task_id: str) -> str:
+    """
+    Import findings from a completed Burp active scan into the engagement finding log.
+    Runs dedup check on each finding before importing — will not double-log.
+    Call after poll_burp_scan() returns status == 'succeeded'.
+    Returns count of new findings added and duplicates skipped.
+    """
+    path = _eng_path(eid)
+    config = _read_json(path / "config.json")
+    bridge = _burp_from_config(config)
+    if not bridge:
+        return json.dumps({"error": "Burp not enabled for this engagement."})
+
+    burp_findings = bridge.get_scan_findings(task_id)
+    if not burp_findings:
+        return json.dumps({"imported": 0, "message": "No findings returned from Burp scan."})
+
+    existing = _read_json(path / "findings.json")
+    existing_summaries = [
+        f"{f.get('title','')} | {f.get('vuln_class','')} | {f.get('endpoint','')}"
+        for f in existing
+    ]
+
+    sup = _get_supervisor(eid)
+    imported = 0
+    skipped_dupes = 0
+
+    for bf in burp_findings:
+        summary = f"{bf['title']} | {bf['vuln_class']} | {bf['endpoint']}"
+        dedup = sup.check_duplicate_finding(summary, existing_summaries)
+        if dedup.get("is_duplicate") and dedup.get("confidence", 0) > 0.7:
+            skipped_dupes += 1
+            continue
+
+        finding_id = f"FIND-{len(existing)+1:03d}"
+        finding = {
+            "id": finding_id,
+            "title": bf["title"],
+            "severity": bf["severity"],
+            "vuln_class": bf["vuln_class"].upper(),
+            "endpoint": bf["endpoint"],
+            "description": bf["description"],
+            "evidence": bf["evidence"],
+            "remediation": bf["remediation"],
+            "cvss_score": 0.0,
+            "status": "potential",
+            "source": "burp_active_scan",
+            "burp_confidence": bf.get("confidence", "tentative"),
+            "logged_at": datetime.utcnow().isoformat(),
+        }
+        existing.append(finding)
+        existing_summaries.append(summary)
+        imported += 1
+
+        with open(path / "findings.md", "a") as f:
+            f.write(f"\n## {finding_id}: {bf['title']} [BURP]\n")
+            f.write(f"**Severity:** {bf['severity'].upper()} | **Confidence:** {bf.get('confidence','')}\n")
+            f.write(f"**Endpoint:** {bf['endpoint']}\n\n{bf['description']}\n\n")
+            f.write(f"**Evidence:**\n{bf['evidence']}\n\n---\n")
+
+    _write_json(path / "findings.json", existing)
+    _log(eid, f"[BURP] imported {imported} findings, skipped {skipped_dupes} dupes from task {task_id}")
+    return json.dumps({
+        "imported": imported,
+        "skipped_duplicates": skipped_dupes,
+        "total_from_burp": len(burp_findings),
     })
 
 
